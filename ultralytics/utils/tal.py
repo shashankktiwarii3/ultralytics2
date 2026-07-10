@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from . import LOGGER
 from .metrics import bbox_iou, probiou
+from .nwd import bbox_nwd, tiny_gamma
 from .ops import xywh2xyxy, xywhr2xyxyxyxy, xyxy2xywh
 from .torch_utils import TORCH_1_11
 
@@ -34,7 +35,7 @@ class TaskAlignedAssigner(nn.Module):
         num_classes: int = 80,
         alpha: float = 1.0,
         beta: float = 6.0,
-        stride: list = [8, 16, 32],
+        stride: list | None = None,
         eps: float = 1e-9,
         topk2=None,
     ):
@@ -55,7 +56,7 @@ class TaskAlignedAssigner(nn.Module):
         self.num_classes = num_classes
         self.alpha = alpha
         self.beta = beta
-        self.stride = stride
+        self.stride = stride if stride is not None else [8, 16, 32]
         self.stride_val = self.stride[1] if len(self.stride) > 1 else self.stride[0]
         self.eps = eps
 
@@ -97,13 +98,13 @@ class TaskAlignedAssigner(nn.Module):
         try:
             return self._forward(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
         except RuntimeError as e:
-            if "out of memory" in str(e).lower():
-                # Move tensors to CPU, compute, then move back to original device
-                LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
-                cpu_tensors = [t.cpu() for t in (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)]
-                result = self._forward(*cpu_tensors)
-                return tuple(t.to(device) for t in result)
-            raise
+            if "out of memory" not in str(e).lower():
+                raise
+        # Recover outside the except block: exiting it drops e.__traceback__, releasing the failed attempt's GPU
+        # intermediates back to the allocator so the copy-back below can succeed
+        LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
+        result = self._forward(*(t.cpu() for t in (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)))
+        return tuple(t.to(device) for t in result)
 
     def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
         """Compute the task-aligned assignment.
@@ -345,7 +346,8 @@ class TaskAlignedAssigner(nn.Module):
 
         if self.topk2 != self.topk:
             align_metric = align_metric * mask_pos  # update overlaps
-            max_overlaps_idx = torch.topk(align_metric, self.topk2, dim=-1, largest=True).indices  # (b, n_max_boxes)
+            # (b, n_max_boxes, topk2)
+            max_overlaps_idx = torch.topk(align_metric, self.topk2, dim=-1, largest=True).indices
             topk_idx = torch.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)  # update mask_pos
             topk_idx.scatter_(-1, max_overlaps_idx, 1.0)
             mask_pos *= topk_idx
@@ -353,6 +355,37 @@ class TaskAlignedAssigner(nn.Module):
         # Find each grid serve which gt(index)
         target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
         return target_gt_idx, fg_mask, mask_pos
+
+
+class SATaskAlignedAssigner(TaskAlignedAssigner):
+    """Scale-Adaptive Task-Aligned Assigner.
+
+    Replaces the IoU term in the alignment metric with a blend of IoU and Normalized Wasserstein Distance (NWD),
+    weighted by a size gate that ramps toward NWD as ground-truth objects shrink toward s_min. NWD stays informative
+    when boxes are small enough that IoU collapses to near-zero, giving tiny objects better-quality assigned
+    candidates in both the one-to-many and one-to-one (topk=1) assignment paths.
+
+    References:
+        https://arxiv.org/abs/2110.13389 (NWD, AI-TOD)
+    """
+
+    def __init__(self, *args, nwd_C: float = 12.8, size_lo: float = 8.0, size_hi: float = 32.0, **kwargs):
+        """Initialize SATaskAlignedAssigner with NWD scale constant and tiny-object size gate bounds."""
+        super().__init__(*args, **kwargs)
+        self.nwd_C = nwd_C
+        self.size_lo = size_lo
+        self.size_hi = size_hi
+
+    def iou_calculation(self, gt_bboxes, pd_bboxes):
+        """Blend IoU and NWD, weighted toward NWD as the ground-truth box shrinks."""
+        iou = super().iou_calculation(gt_bboxes, pd_bboxes)
+        nwd = bbox_nwd(gt_bboxes, pd_bboxes, C=self.nwd_C)
+        g = tiny_gamma(gt_bboxes, self.size_lo, self.size_hi)
+        while nwd.dim() > iou.dim():
+            nwd = nwd.squeeze(-1)
+        while g.dim() > iou.dim():
+            g = g.squeeze(-1)
+        return ((1 - g) * iou + g * nwd).clamp_(0)
 
 
 class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
@@ -373,15 +406,16 @@ class RotatedTaskAlignedAssigner(TaskAlignedAssigner):
         Returns:
             (torch.Tensor): Boolean mask of positive anchors with shape (b, n_boxes, h*w).
         """
-        wh_mask = gt_bboxes[..., 2:4] < self.stride[0]
-        gt_bboxes[..., 2:4] = torch.where(
+        gt_bboxes_clone = gt_bboxes.clone()
+        wh_mask = gt_bboxes_clone[..., 2:4] < self.stride[0]
+        gt_bboxes_clone[..., 2:4] = torch.where(
             (wh_mask * mask_gt).bool(),
-            torch.tensor(self.stride_val, dtype=gt_bboxes.dtype, device=gt_bboxes.device),
-            gt_bboxes[..., 2:4],
+            torch.tensor(self.stride_val, dtype=gt_bboxes_clone.dtype, device=gt_bboxes_clone.device),
+            gt_bboxes_clone[..., 2:4],
         )
 
         # (b, n_boxes, 5) --> (b, n_boxes, 4, 2)
-        corners = xywhr2xyxyxyxy(gt_bboxes)
+        corners = xywhr2xyxyxyxy(gt_bboxes_clone)
         # (b, n_boxes, 1, 2)
         a, b, _, d = corners.split(1, dim=-2)
         ab = b - a
@@ -461,7 +495,7 @@ def rbox2dist(
     dim: int = -1,
     reg_max: int | None = None,
 ):
-    """Decode rotated bounding box (xywh) to distance(ltrb). This is the inverse of dist2rbox.
+    """Transform rotated bounding box (xywh) to distance (ltrb). This is the inverse of dist2rbox.
 
     Args:
         target_bboxes (torch.Tensor): Target rotated bounding boxes with shape (bs, h*w, 4), format [x, y, w, h].
@@ -471,7 +505,7 @@ def rbox2dist(
         reg_max (int, optional): Maximum regression value for clamping.
 
     Returns:
-        (torch.Tensor): Predicted rotated distance with shape (bs, h*w, 4), format [l, t, r, b].
+        (torch.Tensor): Rotated distance with shape (bs, h*w, 4), format [l, t, r, b].
     """
     xy, wh = target_bboxes.split(2, dim=dim)
     offset = xy - anchor_points  # (bs, h*w, 2)

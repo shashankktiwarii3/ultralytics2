@@ -87,12 +87,14 @@ from .head import (
     RTDETRDecoder,
     Segment,
     Segment26,
+    SemanticSegment,
     WorldDetect,
     YOLOEDetect,
     YOLOESegment,
     YOLOESegment26,
     v10Detect,
 )
+from .tiny import MSFuse, SPDConv
 from .transformer import (
     AIFI,
     MLP,
@@ -164,6 +166,7 @@ __all__ = (
     "LightConv",
     "MLPBlock",
     "MSDeformAttn",
+    "MSFuse",
     "MaxSigmoidAttnBlock",
     "Pose",
     "Pose26",
@@ -175,8 +178,10 @@ __all__ = (
     "RepVGGDW",
     "ResNetLayer",
     "SCDown",
+    "SPDConv",
     "Segment",
     "Segment26",
+    "SemanticSegment",
     "SpatialAttention",
     "TorchVision",
     "TransformerBlock",
