@@ -16,7 +16,6 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import (
     RotatedTaskAlignedAssigner,
     SATaskAlignedAssigner,
-    TaskAlignedAssigner,
     dist2bbox,
     dist2rbox,
     make_anchors,
