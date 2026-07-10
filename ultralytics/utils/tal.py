@@ -362,8 +362,8 @@ class SATaskAlignedAssigner(TaskAlignedAssigner):
 
     Replaces the IoU term in the alignment metric with a blend of IoU and Normalized Wasserstein Distance (NWD),
     weighted by a size gate that ramps toward NWD as ground-truth objects shrink toward s_min. NWD stays informative
-    when boxes are small enough that IoU collapses to near-zero, giving tiny objects better-quality assigned
-    candidates in both the one-to-many and one-to-one (topk=1) assignment paths.
+    when boxes are small enough that IoU collapses to near-zero, giving tiny objects better-quality assigned candidates
+    in both the one-to-many and one-to-one (topk=1) assignment paths.
 
     References:
         https://arxiv.org/abs/2110.13389 (NWD, AI-TOD)
