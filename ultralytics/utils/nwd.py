@@ -9,7 +9,7 @@ import torch
 def bbox_nwd(box1: torch.Tensor, box2: torch.Tensor, C: float = 12.8, eps: float = 1e-7) -> torch.Tensor:
     """Normalized Wasserstein Distance between xyxy boxes modeled as 2D Gaussians N(c, diag(w^2/4, h^2/4)).
 
-    W2^2 = ||c1-c2||^2 + (||w1-w2||^2 + ||h1-h2||^2)/4 ;  NWD = exp(-sqrt(W2)/C).
+    W2^2 = ||c1-c2||^2 + (||w1-w2||^2 + ||h1-h2||^2)/4 ; NWD = exp(-sqrt(W2)/C).
 
     Args:
         box1 (torch.Tensor): Boxes in xyxy format, pixel space.
