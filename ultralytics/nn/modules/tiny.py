@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 from .conv import Conv
 
-__all__ = ("SPDConv", "MSFuse")
+__all__ = ("MSFuse", "SPDConv")
 
 
 class SPDConv(nn.Module):
@@ -43,7 +43,5 @@ class MSFuse(nn.Module):
     def forward(self, xs: list[torch.Tensor]) -> torch.Tensor:
         """Fuse P3 with upsampled, projected coarser-scale features."""
         p3 = self.base(xs[0])
-        fused = sum(
-            F.interpolate(proj(x), size=p3.shape[2:], mode="nearest") for proj, x in zip(self.proj, xs[1:])
-        )
+        fused = sum(F.interpolate(proj(x), size=p3.shape[2:], mode="nearest") for proj, x in zip(self.proj, xs[1:]))
         return p3 + torch.sigmoid(self.gate) * fused
